@@ -1,0 +1,93 @@
+stages:
+  -  terraform
+  -  build
+  -  deploy_to_cloud_run
+  -  deploy_to_vm
+
+variables:
+  TF_ROOT: $CI_PROJECT_DIR/image-creation #Terraform plan folder
+  _TF_PLAN_NAME: plan.json # Terraform plan file
+  _SERVICE_REGION   : europe-west1
+  _DOCKER_REGISTRY  : gitlab-docker-repo #Artifact registry folder name
+  _DOCKER_IMAGENAME : nginx-app #Artifact registry aplication
+  _INSTANCE_NAME    : docker-instace-2
+  _INSTANCE_ZONE    : europe-west1-b
+  _SERVICE_IMAGE    : europe-west1-docker.pkg.dev/$GOOGLE_CLOUD_PROJECT/$_DOCKER_REGISTRY/$_DOCKER_IMAGENAME
+  # _SERVICE_IMAGE_TAG    : europe-west1-docker.pkg.dev/$GOOGLE_CLOUD_PROJECT/$_DOCKER_REGISTRY/$_DOCKER_IMAGENAME:latest
+
+
+terraform:
+  stage: terraform
+  image:
+    name: hashicorp/terraform:light
+    entrypoint:
+      - '/usr/bin/env'
+      - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+  before_script:
+     -  cd terraform
+     -  rm -rf .terraform
+     -  terraform --version
+     -  echo $GCP_SERVICE_ACCOUNT > /tmp/serviceaccount.json
+     -  terraform init
+  script:
+     - set -e 
+     - if ! terraform validate ; then echo "Error: Terraform validation failed" && exit 1; fi
+     - terraform plan -out=$_TF_PLAN_NAME -refresh=true -var="instance_name=$_INSTANCE_NAME" -var="zone=$_INSTANCE_ZONE"
+     - terraform apply -auto-approve $_TF_PLAN_NAME
+  only:
+    changes:
+      - "*.tf"
+      - "**/*.tf"
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - echo $GCP_SERVICE_ACCOUNT | docker login -u _json_key --password-stdin https://europe-west1-docker.pkg.dev
+  script:
+    - docker build -t $_SERVICE_IMAGE:$CI_COMMIT_SHA .
+    - docker tag $_SERVICE_IMAGE:$CI_COMMIT_SHA $_SERVICE_IMAGE:$CI_COMMIT_SHA
+    - docker push $_SERVICE_IMAGE:$CI_COMMIT_SHA
+
+
+
+deploy_to_vm:
+    stage: deploy_to_vm
+    only:
+        - main
+    image: google/cloud-sdk:latest
+    services:
+        - docker:dind
+    before_script:
+        - set -e
+        - echo "$GCP_SERVICE_ACCOUNT" > /tmp/gcloud-auth.json
+        - gcloud auth activate-service-account --key-file /tmp/gcloud-auth.json
+        - gcloud config set project $GOOGLE_CLOUD_PROJECT
+        - gcloud compute project-info add-metadata --metadata enable-oslogin=TRUE
+    script:
+        - set -e
+        - gcloud compute ssh $_INSTANCE_NAME --zone=$_INSTANCE_ZONE --quiet --command "echo '$GCP_SERVICE_ACCOUNT'| sudo docker login -u _json_key --password-stdin https://europe-west1-docker.pkg.dev"
+        - gcloud compute ssh $_INSTANCE_NAME --zone=$_INSTANCE_ZONE --quiet --command "sudo docker pull $_SERVICE_IMAGE:$CI_COMMIT_SHA"
+        - gcloud compute ssh $_INSTANCE_NAME --zone=$_INSTANCE_ZONE --quiet --command "if sudo docker ps -a --format '{{.Names}}' | grep -Eq "^landing$"; then sudo docker stop landing && sudo docker rm landing; fi"
+        - gcloud compute ssh $_INSTANCE_NAME --zone=$_INSTANCE_ZONE --quiet --command "sudo docker run -d --name landing $_SERVICE_IMAGE:$CI_COMMIT_SHA -p 80:80"
+    after_script:
+    # Cleanup service account credentials file
+        - rm /tmp/gcloud-auth.json
+
+deploy_to_cloud_run:
+    stage: deploy_to_cloud_run
+    only:
+        - test
+    image: google/cloud-sdk:latest
+    before_script:
+        - set -e
+        - echo "$GCP_SERVICE_ACCOUNT" > /tmp/gcloud-auth.json
+        - gcloud auth activate-service-account --key-file /tmp/gcloud-auth.json
+        - gcloud config set project  $GOOGLE_CLOUD_PROJECT
+    script:
+        - gcloud run services update $_INSTANCE_NAME --region=$_SERVICE_REGION --image=$_SERVICE_IMAGE
+    after_script:
+    # Cleanup service account credentials file
+        - rm /tmp/gcloud-auth.json
