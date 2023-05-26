@@ -3,6 +3,7 @@ stages:
   -  build
   -  deploy_to_cloud_run
   -  deploy_to_vm
+  -  deploy_to_kube
 
 variables:
   TF_ROOT: $CI_PROJECT_DIR/image-creation #Terraform plan folder
@@ -14,6 +15,10 @@ variables:
   _INSTANCE_ZONE    : europe-west1-b
   _SERVICE_IMAGE    : europe-west1-docker.pkg.dev/$GOOGLE_CLOUD_PROJECT/$_DOCKER_REGISTRY/$_DOCKER_IMAGENAME
   # _SERVICE_IMAGE_TAG    : europe-west1-docker.pkg.dev/$GOOGLE_CLOUD_PROJECT/$_DOCKER_REGISTRY/$_DOCKER_IMAGENAME:latest
+  _KLASTER_NAME     : cluster-1
+  _KLASTER_ZONE     : us-central1-c
+  _DEPLOYMENT_NAME  : nginx-deployment
+  _SERVICE_DEPLOYMENT_NAME : nginx-service
 
 
 terraform:
@@ -31,7 +36,7 @@ terraform:
      -  terraform init
   script:
      - set -e 
-     - if ! terraform validate ; then echo "Error: Terraform validation failed" && exit 1; fi
+     - terraform validate
      - terraform plan -out=$_TF_PLAN_NAME -refresh=true -var="instance_name=$_INSTANCE_NAME" -var="zone=$_INSTANCE_ZONE"
      - terraform apply -auto-approve $_TF_PLAN_NAME
   only:
@@ -91,3 +96,28 @@ deploy_to_cloud_run:
     after_script:
     # Cleanup service account credentials file
         - rm /tmp/gcloud-auth.json
+        
+deploy_to_kube:
+    stage: deploy_to_kube
+    only: 
+        - kube
+    image: dwdraju/gke-kubectl-docker:latest
+    before_script: 
+        - echo "$GCP_SERVICE_ACCOUNT" > /tmp/gcloud-auth.json
+        - gcloud auth activate-service-account --key-file /tmp/gcloud-auth.json
+        - gcloud config set project  $GOOGLE_CLOUD_PROJECT
+        - gcloud container clusters get-credentials $_KLASTER_NAME --zone $_KLASTER_ZONE --project $GOOGLE_CLOUD_PROJECT
+    script:
+         - |
+            if kubectl get deployment  >/dev/null 2>&1; then
+              echo "Nginx deployment already exists"
+              kubectl set image deployment/$_DEPLOYMENT_NAME nginx=$_SERVICE_IMAGE:$CI_COMMIT_SHA
+            else
+              kubectl create -f ./k8s/nginx-deployment.yaml --image=$_SERVICE_IMAGE:$CI_COMMIT_SHA
+            fi 
+            
+            if kubectl get service $_SERVICE_DEPLOYMENT_NAME >/dev/null 2>&1; then
+              echo "Nginx service already exists"
+            else
+              kubectl create -f ./k8s/nginx-service.yaml
+            fi

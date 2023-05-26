@@ -14,10 +14,12 @@ Terrafrom: Create infrustructure for our application. In our case it`s Google co
 Build: The Docker image is built from the source code and pushed to the Artifact registry.
 Deploy_to_vm: Docker container is deployed to the GCP instance. For main branch
 Deploy_to_cloud_run: Docker container is deployed to Cloud Run. For test branch
+Deploy_to_kube: Docker container deployed to GKE. For kube branch
 
 Technologies Used
 
 Docker
+Kubernetis
 Terraform
 GitLab
 Google Cloud Platform (GCP)
